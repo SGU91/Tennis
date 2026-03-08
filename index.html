@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tennis Value Bot</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #080c14; font-family: monospace; }
+    input { outline: none; }
+    input:focus { border-color: #00d4ff !important; }
+    input::placeholder { color: #2d4060; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState } = React;
+
+const SYSTEM_PROMPT = "Tu es un expert en value betting tennis. Analyse le match et reponds UNIQUEMENT en JSON valide, sans texte avant ou apres, sans backticks. Structure : {\"joueur1\":\"nom\",\"joueur2\":\"nom\",\"tournoi\":\"tournoi surface\",\"date\":\"date\",\"donnees\":{\"classement_j1\":\"ATP #X\",\"classement_j2\":\"ATP #X\",\"forme_j1\":\"X wins Y losses\",\"forme_j2\":\"X wins Y losses\",\"h2h\":\"X-Y pour...\",\"h2h_surface\":\"X-Y\",\"fatigue_j1\":\"X matchs en 7j\",\"fatigue_j2\":\"X matchs en 7j\",\"surface_j1\":\"bilan\",\"surface_j2\":\"bilan\",\"contexte\":\"infos\"},\"analyse\":{\"facteurs_positifs_j1\":[\"f1\",\"f2\"],\"facteurs_negatifs_j1\":[\"f1\",\"f2\"],\"probabilite_j1\":65,\"probabilite_j2\":35,\"explication_proba\":\"explication\"},\"value_bet\":{\"cote_j1_fournie\":1.85,\"cote_j2_fournie\":2.10,\"value_j1\":0.20,\"value_j2\":-0.26,\"verdict\":\"VALUE BET J1\",\"joueur_recommande\":\"nom\",\"niveau_confiance\":\"FORT\",\"explication_value\":\"explication\"},\"mise\":{\"kelly_pct\":1.5,\"mise_sur_1000\":15,\"mise_sur_1500\":22,\"mise_sur_2000\":30,\"conseil\":\"conseil\"},\"verdict_final\":\"PARIER sur X\",\"raison_finale\":\"explication\"}";
+
+const ODDS_KEY = "e5daa78127b5323bda3447dadf57362c";
+const BG="#080c14",SURFACE="#0d1321",CARD="#111827",BORDER="#1e2d45",ACCENT="#00d4ff",GOLD="#f59e0b",GREEN="#10b981",RED="#ef4444",MUTED="#4b6080",TEXT="#e2e8f0",DIM="#94a3b8";
+
+function App() {
+  const [match, setMatch] = useState("");
+  const [cote1, setCote1] = useState("");
+  const [cote2, setCote2] = useState("");
+  const [bankroll, setBankroll] = useState("1500");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+  const [history, setHistory] = useState([]);
+  const [matchList, setMatchList] = useState([]);
+  const [loadingMatches, setLoadingMatches] = useState(false);
+  const [showMatches, setShowMatches] = useState(false);
+
+  async function chargerMatchs() {
+    setLoadingMatches(true); setError("");
+    try {
+      const res = await fetch("https://api.the-odds-api.com/v4/sports/tennis_atp/odds/?apiKey="+ODDS_KEY+"&regions=eu&markets=h2h&bookmakers=pinnacle&oddsFormat=decimal");
+      if (!res.ok) throw new Error("Erreur API "+res.status);
+      const data = await res.json();
+      const matches = data.map(m => {
+        const outcomes = m.bookmakers?.[0]?.markets?.[0]?.outcomes || [];
+        const o1 = outcomes.find(o => o.name === m.home_team);
+        const o2 = outcomes.find(o => o.name === m.away_team);
+        return { label: m.home_team+" vs "+m.away_team, joueur1: m.home_team, joueur2: m.away_team, tournoi: m.sport_title, cote1: o1?.price||null, cote2: o2?.price||null };
+      }).filter(m => m.cote1 && m.cote2);
+      setMatchList(matches); setShowMatches(true);
+      if (matches.length === 0) setError("Aucun match ATP disponible");
+    } catch(e) { setError("Erreur : "+e.message); }
+    setLoadingMatches(false);
+  }
+
+  function selectionner(m) {
+    setMatch(m.label+", "+m.tournoi);
+    setCote1(String(m.cote1)); setCote2(String(m.cote2));
+    setShowMatches(false);
+  }
+
+  async function analyser() {
+    if (!match.trim()) return;
+    if (!cote1 || !cote2) { setError("Entre les cotes des deux joueurs"); return; }
+    setError(""); setLoading(true); setResult(null);
+    const prompt = "Match : "+match+"\nCote J1 Pinnacle : "+cote1+"\nCote J2 Pinnacle : "+cote2+"\nBankroll : "+bankroll+"euro";
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:2000, system:SYSTEM_PROMPT, messages:[{role:"user",content:prompt}] })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      const raw = (data.content||[]).map(b => b.text||"").join("");
+      const fi = raw.indexOf("{"), li = raw.lastIndexOf("}");
+      if (fi===-1||li===-1) throw new Error("Reponse invalide");
+      const parsed = JSON.parse(raw.slice(fi,li+1));
+      setResult(parsed);
+      setHistory(h => [{match,result:parsed,ts:new Date().toLocaleTimeString()},...h.slice(0,4)]);
+    } catch(e) { setError("Erreur : "+e.message); }
+    setLoading(false);
+  }
+
+  const vColor = v => v > 0.03 ? GREEN : v < -0.03 ? RED : GOLD;
+  const verdictColor = v => v?.includes("PARIER") ? GREEN : RED;
+  const confColor = c => c==="FORT" ? GREEN : c==="MOYEN" ? GOLD : RED;
+  const card = { background:CARD, border:"1px solid "+BORDER, borderRadius:12, padding:16, marginBottom:12 };
+
+  if (result) return (
+    <div style={{minHeight:"100vh",background:BG,color:TEXT,fontFamily:"monospace"}}>
+      <div style={{background:"linear-gradient(135deg,"+SURFACE+",#0a1628)",borderBottom:"1px solid "+BORDER,padding:"16px 20px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:8,height:8,borderRadius:"50%",background:GREEN,boxShadow:"0 0 8px "+GREEN}}/>
+          <span style={{fontSize:11,letterSpacing:3,color:ACCENT,fontWeight:600}}>TENNIS VALUE BOT v1.0</span>
+        </div>
+        <button onClick={() => {setResult(null);setMatch("");setCote1("");setCote2("");}}
+          style={{background:"transparent",border:"1px solid "+BORDER,borderRadius:6,padding:"6px 12px",color:MUTED,fontSize:10,cursor:"pointer",fontFamily:"monospace",letterSpacing:2}}>
+          RETOUR
+        </button>
+      </div>
+      <div style={{maxWidth:800,margin:"0 auto",padding:"20px 16px"}}>
+        <div style={{background:result.verdict_final?.includes("PARIER")?"rgba(16,185,129,0.08)":"rgba(239,68,68,0.08)",border:"2px solid "+verdictColor(result.verdict_final),borderRadius:12,padding:24,textAlign:"center",marginBottom:12}}>
+          <div style={{fontSize:10,color:MUTED,letterSpacing:3,marginBottom:8}}>VERDICT</div>
+          <div style={{fontSize:20,fontWeight:700,color:verdictColor(result.verdict_final),marginBottom:8}}>{result.verdict_final}</div>
+          <div style={{fontSize:12,color:DIM}}>{result.raison_finale}</div>
+          {result.value_bet?.niveau_confiance && <div style={{marginTop:12,display:"inline-block",padding:"4px 14px",borderRadius:20,border:"1px solid "+confColor(result.value_bet.niveau_confiance),fontSize:10,color:confColor(result.value_bet.niveau_confiance),letterSpacing:2}}>CONFIANCE : {result.value_bet.niveau_confiance}</div>}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+          <div style={card}>
+            <div style={{fontSize:10,color:ACCENT,letterSpacing:3,marginBottom:12}}>MATCH</div>
+            <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>{result.joueur1}</div>
+            <div style={{fontSize:10,color:MUTED,marginBottom:8}}>VS</div>
+            <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>{result.joueur2}</div>
+            <div style={{fontSize:11,color:DIM}}>{result.tournoi}</div>
+          </div>
+          <div style={card}>
+            <div style={{fontSize:10,color:ACCENT,letterSpacing:3,marginBottom:12}}>PROBABILITES</div>
+            {[["joueur1","probabilite_j1",ACCENT],["joueur2","probabilite_j2",MUTED]].map(([j,p,c],i) => (
+              <div key={i} style={{marginBottom:10}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                  <span style={{fontSize:11,color:DIM}}>{result[j]?.split(" ").pop()}</span>
+                  <span style={{fontSize:14,fontWeight:700,color:c}}>{result.analyse?.[p]}%</span>
+                </div>
+                <div style={{height:5,background:BORDER,borderRadius:3}}>
+                  <div style={{height:"100%",width:(result.analyse?.[p]||0)+"%",background:c,borderRadius:3}}/>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        {result.donnees && <div style={card}>
+          <div style={{fontSize:10,color:ACCENT,letterSpacing:3,marginBottom:12}}>DONNEES</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+            {Object.entries(result.donnees).map(([k,v],i) => (
+              <div key={i} style={{display:"flex",gap:8}}>
+                <span style={{fontSize:9,color:MUTED,minWidth:80}}>{k.replace(/_/g," ").toUpperCase()}</span>
+                <span style={{fontSize:11,color:DIM}}>{v}</span>
+              </div>
+            ))}
+          </div>
+        </div>}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+          <div style={card}>
+            <div style={{fontSize:10,color:GREEN,letterSpacing:3,marginBottom:10}}>POUR</div>
+            {(result.analyse?.facteurs_positifs_j1||[]).map((f,i) => <div key={i} style={{fontSize:11,color:DIM,marginBottom:5}}>+ {f}</div>)}
+          </div>
+          <div style={card}>
+            <div style={{fontSize:10,color:RED,letterSpacing:3,marginBottom:10}}>CONTRE</div>
+            {(result.analyse?.facteurs_negatifs_j1||[]).map((f,i) => <div key={i} style={{fontSize:11,color:DIM,marginBottom:5}}>- {f}</div>)}
+          </div>
+        </div>
+        {result.value_bet && <div style={card}>
+          <div style={{fontSize:10,color:ACCENT,letterSpacing:3,marginBottom:12}}>CALCUL VALUE BET</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:10}}>
+            {[
+              {l:"Cote J1",v:result.value_bet.cote_j1_fournie,c:ACCENT},
+              {l:"Cote J2",v:result.value_bet.cote_j2_fournie,c:ACCENT},
+              {l:"Value J1",v:result.value_bet.value_j1!==undefined?(result.value_bet.value_j1*100).toFixed(1)+"%":"-",c:vColor(result.value_bet.value_j1)},
+              {l:"Value J2",v:result.value_bet.value_j2!==undefined?(result.value_bet.value_j2*100).toFixed(1)+"%":"-",c:vColor(result.value_bet.value_j2)},
+            ].map((item,i) => (
+              <div key={i} style={{textAlign:"center",background:SURFACE,borderRadius:8,padding:"10px 4px"}}>
+                <div style={{fontSize:9,color:MUTED,marginBottom:4}}>{item.l}</div>
+                <div style={{fontSize:16,fontWeight:700,color:item.c}}>{item.v}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{fontSize:11,color:DIM,padding:"10px 12px",background:SURFACE,borderRadius:8}}>{result.value_bet.explication_value}</div>
+        </div>}
+        {result.verdict_final?.includes("PARIER") && result.mise && <div style={{background:"rgba(16,185,129,0.06)",border:"1px solid "+GREEN,borderRadius:12,padding:16,marginBottom:12}}>
+          <div style={{fontSize:10,color:GREEN,letterSpacing:3,marginBottom:12}}>MISE RECOMMANDEE (Kelly 1/4)</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:10}}>
+            {[["Kelly %",result.mise.kelly_pct+"%"],["1000€",result.mise.mise_sur_1000+"€"],["1500€",result.mise.mise_sur_1500+"€"],["2000€",result.mise.mise_sur_2000+"€"]].map(([l,v],i) => (
+              <div key={i} style={{textAlign:"center",background:CARD,borderRadius:8,padding:"10px 4px"}}>
+                <div style={{fontSize:9,color:MUTED,marginBottom:4}}>{l}</div>
+                <div style={{fontSize:16,fontWeight:700,color:GREEN}}>{v}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{fontSize:11,color:DIM,padding:"10px 12px",background:CARD,borderRadius:8}}>{result.mise.conseil}</div>
+        </div>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{minHeight:"100vh",background:BG,color:TEXT,fontFamily:"monospace"}}>
+      <div style={{background:"linear-gradient(135deg,"+SURFACE+",#0a1628)",borderBottom:"1px solid "+BORDER,padding:"16px 20px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:8,height:8,borderRadius:"50%",background:GREEN,boxShadow:"0 0 8px "+GREEN}}/>
+          <span style={{fontSize:11,letterSpacing:3,color:ACCENT,fontWeight:600}}>TENNIS VALUE BOT v1.0</span>
+        </div>
+        <div style={{fontSize:10,color:MUTED,letterSpacing:2}}>CLAUDE · PINNACLE</div>
+      </div>
+      <div style={{maxWidth:800,margin:"0 auto",padding:"20px 16px"}}>
+        <div style={{background:CARD,border:"1px solid "+BORDER,borderRadius:12,padding:20,marginBottom:16}}>
+          <div style={{fontSize:10,color:ACCENT,letterSpacing:3,marginBottom:14,fontWeight:600}}>ANALYSE DU MATCH</div>
+          <button onClick={chargerMatchs} disabled={loadingMatches}
+            style={{width:"100%",padding:11,marginBottom:14,background:"transparent",border:"1px solid "+ACCENT,borderRadius:8,color:ACCENT,fontSize:11,letterSpacing:2,fontFamily:"monospace",cursor:"pointer"}}>
+            {loadingMatches ? "CHARGEMENT..." : "MATCHS ATP DU JOUR (Pinnacle)"}
+          </button>
+          {showMatches && matchList.length > 0 && (
+            <div style={{marginBottom:14,background:SURFACE,borderRadius:8,border:"1px solid "+BORDER,maxHeight:220,overflowY:"auto"}}>
+              {matchList.map((m,i) => (
+                <div key={i} onClick={() => selectionner(m)}
+                  style={{padding:"10px 14px",borderBottom:"1px solid "+BORDER,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:600}}>{m.label}</div>
+                    <div style={{fontSize:10,color:MUTED,marginTop:2}}>{m.tournoi}</div>
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <span style={{fontSize:13,color:ACCENT,fontWeight:700}}>{m.cote1}</span>
+                    <span style={{fontSize:10,color:MUTED}}>vs</span>
+                    <span style={{fontSize:13,color:ACCENT,fontWeight:700}}>{m.cote2}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{marginBottom:12}}>
+            <div style={{fontSize:10,color:MUTED,letterSpacing:2,marginBottom:6}}>MATCH</div>
+            <input value={match} onChange={e => setMatch(e.target.value)} placeholder="Ex: Djokovic vs Alcaraz, Indian Wells 2026"
+              style={{width:"100%",background:SURFACE,border:"1px solid "+BORDER,borderRadius:8,padding:"11px 13px",color:TEXT,fontSize:13,fontFamily:"monospace",boxSizing:"border-box"}}/>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}}>
+            {[["COTE J1",cote1,setCote1,ACCENT,"1.85"],["COTE J2",cote2,setCote2,ACCENT,"2.10"],["BANKROLL (€)",bankroll,setBankroll,GOLD,"1500"]].map(([label,val,setter,color,ph],i) => (
+              <div key={i}>
+                <div style={{fontSize:10,color:MUTED,letterSpacing:2,marginBottom:6}}>{label}</div>
+                <input value={val} onChange={e => setter(e.target.value)} placeholder={ph}
+                  style={{width:"100%",background:SURFACE,border:"1px solid "+BORDER,borderRadius:8,padding:"11px 10px",color:color,fontSize:14,fontFamily:"monospace",boxSizing:"border-box",fontWeight:600}}/>
+              </div>
+            ))}
+          </div>
+          {error && <div style={{color:RED,fontSize:12,marginBottom:10}}>{error}</div>}
+          <button onClick={analyser} disabled={loading||!match}
+            style={{width:"100%",padding:14,background:(loading||!match)?BORDER:"linear-gradient(135deg,#0066cc,"+ACCENT+")",border:"none",borderRadius:8,color:(loading||!match)?MUTED:"#fff",fontSize:12,letterSpacing:3,fontFamily:"monospace",fontWeight:700,cursor:(loading||!match)?"not-allowed":"pointer"}}>
+            {loading ? "ANALYSE EN COURS..." : "LANCER L'ANALYSE VALUE BET"}
+          </button>
+        </div>
+        {loading && (
+          <div style={{background:CARD,border:"1px solid "+BORDER,borderRadius:12,padding:28,textAlign:"center",marginBottom:16}}>
+            <div style={{fontSize:10,color:ACCENT,letterSpacing:3,marginBottom:12}}>ANALYSE EN COURS</div>
+            {["Classement ATP et ELO...","Forme recente et H2H...","Stats surface et fatigue...","Calcul probabilites et value..."].map((s,i) => (
+              <div key={i} style={{fontSize:11,color:MUTED,marginBottom:6,animation:"fadeIn 0.5s "+(i*0.3)+"s both"}}>{s}</div>
+            ))}
+          </div>
+        )}
+        {history.length > 0 && (
+          <div style={{background:CARD,border:"1px solid "+BORDER,borderRadius:12,padding:16}}>
+            <div style={{fontSize:10,color:ACCENT,letterSpacing:3,marginBottom:12}}>HISTORIQUE</div>
+            {history.map((h,i) => (
+              <div key={i} onClick={() => setResult(h.result)}
+                style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:i<history.length-1?"1px solid "+BORDER:"none",cursor:"pointer"}}>
+                <span style={{fontSize:11,color:DIM}}>{h.match}</span>
+                <span style={{fontSize:10,color:h.result.verdict_final?.includes("PARIER")?GREEN:RED}}>
+                  {h.result.verdict_final?.includes("PARIER")?"VALUE":"NO BET"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{marginTop:20,textAlign:"center",fontSize:9,color:MUTED,letterSpacing:2}}>TENNIS VALUE BOT · JOUER RESPONSABLE · 18+</div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
